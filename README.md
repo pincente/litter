@@ -103,18 +103,18 @@ Prerequisites:
 
 - Java 17
 - Android SDK + build tools for API 35
-- Gradle 8.x (or wrapper, once added)
+- Android SDK path configured via `apps/android/local.properties` (for example: `sdk.dir=/opt/homebrew/share/android-commandlinetools`)
 
 Build Android flavors:
 
 ```bash
-gradle -p apps/android :app:assembleOnDeviceDebug :app:assembleRemoteOnlyDebug
+./apps/android/gradlew -p apps/android :app:assembleOnDeviceDebug :app:assembleRemoteOnlyDebug
 ```
 
 Run Android unit tests:
 
 ```bash
-gradle -p apps/android :app:testOnDeviceDebugUnitTest :app:testRemoteOnlyDebugUnitTest
+./apps/android/gradlew -p apps/android :app:testOnDeviceDebugUnitTest :app:testRemoteOnlyDebugUnitTest
 ```
 
 Start emulator and install on-device debug build:
@@ -125,6 +125,14 @@ ANDROID_SDK_ROOT=/opt/homebrew/share/android-commandlinetools \
 
 adb -e install -r apps/android/app/build/outputs/apk/onDevice/debug/app-onDevice-debug.apk
 adb -e shell am start -n com.sigkitten.litter.android/com.litter.android.MainActivity
+```
+
+Deploy to a connected physical phone (USB or wireless ADB):
+
+```bash
+./tools/scripts/android-deploy-phone.sh onDevice
+# or
+./tools/scripts/android-deploy-phone.sh remoteOnly
 ```
 
 Build Android Rust JNI libs (optional bridge runtime step):

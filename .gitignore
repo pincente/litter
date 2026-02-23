@@ -20,6 +20,9 @@ Packages/
 
 # Android JNI outputs (generated from Rust bridge)
 apps/android/core/bridge/src/main/jniLibs/*/*.so
+apps/android/.gradle/
+apps/android/.kotlin/
+apps/android/local.properties
 
 # Logs and temp
 *.log

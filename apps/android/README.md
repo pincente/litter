@@ -32,6 +32,14 @@ Examples:
 ./gradlew :app:assembleRemoteOnlyDebug
 ```
 
+From repository root, build + install + launch on a connected phone:
+
+```bash
+./tools/scripts/android-deploy-phone.sh onDevice
+# or
+./tools/scripts/android-deploy-phone.sh remoteOnly
+```
+
 QA matrix and regression command list: `apps/android/docs/qa-matrix.md`.
 
 ## Rust Bridge (Android)
