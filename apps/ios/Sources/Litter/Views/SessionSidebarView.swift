@@ -117,6 +117,28 @@ struct SessionSidebarView: View {
         return allThreads.filter { threadMatchesSessionSearch($0, query: query) }
     }
 
+    private var groupedFilteredThreads: [SessionFolderGroup] {
+        var orderedGroups: [SessionFolderGroup] = []
+        var groupIndexByPath: [String: Int] = [:]
+
+        for thread in filteredThreads {
+            let normalizedPath = normalizeFolderPath(thread.cwd)
+            if let index = groupIndexByPath[normalizedPath] {
+                orderedGroups[index].threads.append(thread)
+            } else {
+                groupIndexByPath[normalizedPath] = orderedGroups.count
+                orderedGroups.append(
+                    SessionFolderGroup(
+                        folderPath: normalizedPath,
+                        threads: [thread]
+                    )
+                )
+            }
+        }
+
+        return orderedGroups
+    }
+
     private var connectedServerOptions: [DirectoryPickerServerOption] {
         serverManager.connections.values
             .filter { $0.isConnected }
@@ -261,17 +283,57 @@ struct SessionSidebarView: View {
     private var sessionList: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                ForEach(filteredThreads) { thread in
-                    Button {
-                        Task { await resumeSession(thread) }
-                    } label: {
-                        sessionRow(thread)
+                ForEach(groupedFilteredThreads) { group in
+                    let isExpanded = isSessionFolderExpanded(group.folderPath)
+                    folderSectionHeader(group, isExpanded: isExpanded)
+                    if isExpanded {
+                        ForEach(group.threads) { thread in
+                            Button {
+                                Task { await resumeSession(thread) }
+                            } label: {
+                                sessionRow(thread)
+                            }
+                            .disabled(resumingKey != nil)
+                            Divider().background(Color(hex: "#1E1E1E")).padding(.leading, 16)
+                        }
                     }
-                    .disabled(resumingKey != nil)
-                    Divider().background(Color(hex: "#1E1E1E")).padding(.leading, 16)
                 }
             }
         }
+    }
+
+    private func folderSectionHeader(_ group: SessionFolderGroup, isExpanded: Bool) -> some View {
+        Button {
+            guard !isFilteringSessions else { return }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                appState.toggleSessionFolder(group.folderPath)
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(.caption, weight: .semibold))
+                    .foregroundColor(LitterTheme.textSecondary)
+                    .frame(width: 10)
+                Image(systemName: "folder")
+                    .font(.system(.caption))
+                    .foregroundColor(LitterTheme.textSecondary)
+                Text(folderDisplayName(group.folderPath))
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(LitterTheme.textSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if folderDisplayName(group.folderPath) != group.folderPath {
+                    Text(group.folderPath)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundColor(LitterTheme.textMuted)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 6)
+        .buttonStyle(.plain)
     }
 
     private func sessionRow(_ thread: ThreadState) -> some View {
@@ -340,11 +402,7 @@ struct SessionSidebarView: View {
         resumingKey = thread.key
         workDir = thread.cwd
         appState.currentCwd = thread.cwd
-        await serverManager.viewThread(
-            thread.key,
-            approvalPolicy: appState.approvalPolicy,
-            sandboxMode: appState.sandboxMode
-        )
+        await serverManager.viewThread(thread.key)
         resumingKey = nil
         withAnimation(.easeInOut(duration: 0.25)) { appState.sidebarOpen = false }
     }
@@ -353,13 +411,7 @@ struct SessionSidebarView: View {
         workDir = cwd
         appState.currentCwd = cwd
         let model = appState.selectedModel.isEmpty ? nil : appState.selectedModel
-        _ = await serverManager.startThread(
-            serverId: serverId,
-            cwd: cwd,
-            model: model,
-            approvalPolicy: appState.approvalPolicy,
-            sandboxMode: appState.sandboxMode
-        )
+        _ = await serverManager.startThread(serverId: serverId, cwd: cwd, model: model)
         withAnimation(.easeInOut(duration: 0.25)) { appState.sidebarOpen = false }
     }
 
@@ -368,6 +420,47 @@ struct SessionSidebarView: View {
         formatter.unitsStyle = .abbreviated
         return formatter.localizedString(for: date, relativeTo: Date())
     }
+
+    private func normalizeFolderPath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "/" }
+
+        var normalized = trimmed.replacingOccurrences(
+            of: "/+",
+            with: "/",
+            options: .regularExpression
+        )
+        while normalized.count > 1 && normalized.hasSuffix("/") {
+            normalized.removeLast()
+        }
+        return normalized.isEmpty ? "/" : normalized
+    }
+
+    private func folderDisplayName(_ path: String) -> String {
+        if path == "/" {
+            return "/"
+        }
+        let leaf = (path as NSString).lastPathComponent
+        return leaf.isEmpty ? path : leaf
+    }
+
+    private var isFilteringSessions: Bool {
+        !trimmedSessionSearchQuery.isEmpty
+    }
+
+    private func isSessionFolderExpanded(_ folderPath: String) -> Bool {
+        if isFilteringSessions {
+            return true
+        }
+        return !appState.isSessionFolderCollapsed(folderPath)
+    }
+}
+
+private struct SessionFolderGroup: Identifiable {
+    let folderPath: String
+    var threads: [ThreadState]
+
+    var id: String { folderPath }
 }
 
 struct PulsingDot: View {

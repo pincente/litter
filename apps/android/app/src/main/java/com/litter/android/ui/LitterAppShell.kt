@@ -9,6 +9,7 @@ import android.text.format.DateUtils
 import android.util.Base64
 import android.widget.TextView
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.RepeatMode
@@ -50,7 +51,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AttachFile
@@ -62,10 +65,13 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -82,6 +88,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -96,9 +103,20 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
@@ -110,6 +128,8 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.litter.android.core.network.DiscoverySource
 import com.litter.android.state.AccountState
@@ -132,6 +152,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
+import java.util.LinkedHashMap
 import java.util.Locale
 
 @Composable
@@ -147,7 +168,7 @@ fun LitterAppShell(appState: LitterAppState) {
 
     Box(modifier = Modifier.fillMaxSize().background(LitterTheme.backgroundBrush)) {
         Column(
-            modifier = Modifier.fillMaxSize().statusBarsPadding(),
+            modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
         ) {
             HeaderBar(
                 models = uiState.models,
@@ -223,9 +244,11 @@ fun LitterAppShell(appState: LitterAppState) {
             serverCount = uiState.serverCount,
             sessions = uiState.sessions,
             sessionSearchQuery = uiState.sessionSearchQuery,
+            collapsedSessionFolders = uiState.collapsedSessionFolders,
             activeThreadKey = uiState.activeThreadKey,
             onSessionSelected = appState::selectSession,
             onSessionSearchQueryChange = appState::updateSessionSearchQuery,
+            onToggleSessionFolder = appState::toggleSessionFolder,
             onNewSession = appState::openNewSessionPicker,
             onRefresh = appState::refreshSessions,
             onOpenDiscovery = {
@@ -472,16 +495,14 @@ private fun EmptyState(
     val canConnect =
         connectionStatus == ServerConnectionStatus.DISCONNECTED ||
             connectionStatus == ServerConnectionStatus.ERROR
-    val connectedServerNames = remember(connectedServers) { connectedServers.map { it.name }.sorted() }
-    val connectionSummary =
-        remember(connectedServerNames) {
-            val first = connectedServerNames.firstOrNull()
-            if (first.isNullOrBlank()) {
-                ""
-            } else {
-                val extra = connectedServerNames.size - 1
-                if (extra <= 0) "Connected: $first" else "Connected: $first +$extra"
-            }
+    val connectedServerLabels =
+        remember(connectedServers) {
+            connectedServers
+                .sortedBy { it.name.lowercase(Locale.ROOT) }
+                .map { server ->
+                    val name = server.name.ifBlank { "server" }
+                    "$name * ${serverSourceLabel(server.source)}"
+                }
         }
     Box(
         modifier = Modifier.fillMaxSize(),
@@ -498,25 +519,25 @@ private fun EmptyState(
                 style = MaterialTheme.typography.bodyMedium,
                 color = LitterTheme.textMuted,
             )
-            if (connectedServerNames.isNotEmpty()) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+            if (connectedServerLabels.isNotEmpty()) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Box(
-                        modifier =
-                            Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(LitterTheme.accent),
-                    )
                     Text(
-                        text = connectionSummary,
+                        text = "Connected Servers",
                         style = MaterialTheme.typography.labelLarge,
-                        color = LitterTheme.accent,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                        color = LitterTheme.textSecondary,
                     )
+                    connectedServerLabels.forEach { label ->
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = LitterTheme.accent,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
             if (canConnect) {
@@ -535,9 +556,11 @@ private fun SessionSidebar(
     serverCount: Int,
     sessions: List<ThreadState>,
     sessionSearchQuery: String,
+    collapsedSessionFolders: Set<String>,
     activeThreadKey: ThreadKey?,
     onSessionSelected: (ThreadKey) -> Unit,
     onSessionSearchQueryChange: (String) -> Unit,
+    onToggleSessionFolder: (String) -> Unit,
     onNewSession: () -> Unit,
     onRefresh: () -> Unit,
     onOpenDiscovery: () -> Unit,
@@ -550,6 +573,8 @@ private fun SessionSidebar(
         } else {
             sessions.filter { matchesSessionSearch(it, normalizedQuery) }
         }
+    val groupedSessions = remember(filteredSessions) { groupSessionsByFolder(filteredSessions) }
+    val isFilteringSessions = normalizedQuery.isNotEmpty()
 
     Surface(
         modifier = modifier,
@@ -623,66 +648,80 @@ private fun SessionSidebar(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        items(items = filteredSessions, key = { "${it.key.serverId}:${it.key.threadId}" }) { thread ->
-                            val isActive = thread.key == activeThreadKey
-                            Surface(
-                                modifier = Modifier.fillMaxWidth().clickable { onSessionSelected(thread.key) },
-                                color =
-                                    if (isActive) {
-                                        LitterTheme.surfaceLight.copy(alpha = 0.58f)
-                                    } else {
-                                        LitterTheme.surface.copy(alpha = 0.58f)
-                                    },
-                                shape = RoundedCornerShape(8.dp),
-                                border =
-                                    androidx.compose.foundation.BorderStroke(
-                                        1.dp,
-                                        if (isActive) LitterTheme.accent else LitterTheme.border,
-                                    ),
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalAlignment = Alignment.Top,
-                                ) {
-                                    if (thread.hasTurnActive) {
-                                        ActiveTurnPulseDot(modifier = Modifier.padding(top = 3.dp))
-                                    } else {
-                                        Spacer(modifier = Modifier.size(8.dp))
-                                    }
-                                    Column(
-                                        modifier = Modifier.weight(1f),
-                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        groupedSessions.forEach { group ->
+                            val isExpanded = isFilteringSessions || !collapsedSessionFolders.contains(group.folderPath)
+                            item(key = "folder-${group.folderPath}") {
+                                FolderGroupHeader(
+                                    folderPath = group.folderPath,
+                                    isExpanded = isExpanded,
+                                    canToggle = !isFilteringSessions,
+                                    onToggle = { onToggleSessionFolder(group.folderPath) },
+                                )
+                            }
+
+                            if (isExpanded) {
+                                items(items = group.threads, key = { "${it.key.serverId}:${it.key.threadId}" }) { thread ->
+                                    val isActive = thread.key == activeThreadKey
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth().clickable { onSessionSelected(thread.key) },
+                                        color =
+                                            if (isActive) {
+                                                LitterTheme.surfaceLight.copy(alpha = 0.58f)
+                                            } else {
+                                                LitterTheme.surface.copy(alpha = 0.58f)
+                                            },
+                                        shape = RoundedCornerShape(8.dp),
+                                        border =
+                                            androidx.compose.foundation.BorderStroke(
+                                                1.dp,
+                                                if (isActive) LitterTheme.accent else LitterTheme.border,
+                                            ),
                                     ) {
-                                        Text(
-                                            text = thread.preview.ifBlank { "Untitled session" },
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis,
-                                            color = LitterTheme.textPrimary,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                        )
                                         Row(
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            verticalAlignment = Alignment.Top,
                                         ) {
-                                            Text(
-                                                text = relativeDate(thread.updatedAtEpochMillis),
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                color = LitterTheme.textSecondary,
-                                                style = MaterialTheme.typography.labelLarge,
-                                            )
-                                            ServerSourceBadge(
-                                                source = thread.serverSource,
-                                                serverName = thread.serverName,
-                                            )
-                                            Text(
-                                                text = cwdLeaf(thread.cwd),
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                color = LitterTheme.textMuted,
-                                                style = MaterialTheme.typography.labelLarge,
-                                            )
+                                            if (thread.hasTurnActive) {
+                                                ActiveTurnPulseDot(modifier = Modifier.padding(top = 3.dp))
+                                            } else {
+                                                Spacer(modifier = Modifier.size(8.dp))
+                                            }
+                                            Column(
+                                                modifier = Modifier.weight(1f),
+                                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                                            ) {
+                                                Text(
+                                                    text = thread.preview.ifBlank { "Untitled session" },
+                                                    maxLines = 2,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    color = LitterTheme.textPrimary,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                )
+                                                Row(
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                ) {
+                                                    Text(
+                                                        text = relativeDate(thread.updatedAtEpochMillis),
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        color = LitterTheme.textSecondary,
+                                                        style = MaterialTheme.typography.labelLarge,
+                                                    )
+                                                    ServerSourceBadge(
+                                                        source = thread.serverSource,
+                                                        serverName = thread.serverName,
+                                                    )
+                                                    Text(
+                                                        text = cwdLeaf(thread.cwd),
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        color = LitterTheme.textMuted,
+                                                        style = MaterialTheme.typography.labelLarge,
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -718,6 +757,55 @@ private fun SessionSidebar(
     }
 }
 
+@Composable
+private fun FolderGroupHeader(
+    folderPath: String,
+    isExpanded: Boolean,
+    canToggle: Boolean,
+    onToggle: () -> Unit,
+) {
+    val folderName = cwdLeaf(folderPath)
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 6.dp, bottom = 2.dp)
+                .clickable(enabled = canToggle, onClick = onToggle),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(
+            imageVector = if (isExpanded) Icons.Default.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = if (isExpanded) "Collapse workspace folder" else "Expand workspace folder",
+            modifier = Modifier.size(14.dp),
+            tint = LitterTheme.textSecondary,
+        )
+        Icon(
+            imageVector = Icons.Default.Folder,
+            contentDescription = null,
+            modifier = Modifier.size(12.dp),
+            tint = LitterTheme.textSecondary,
+        )
+        Text(
+            text = folderName,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = LitterTheme.textSecondary,
+            style = MaterialTheme.typography.labelLarge,
+        )
+        Spacer(modifier = Modifier.weight(1f))
+        if (folderName != folderPath) {
+            Text(
+                text = folderPath,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                color = LitterTheme.textMuted,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+    }
+}
+
 private fun matchesSessionSearch(
     thread: ThreadState,
     query: String,
@@ -726,6 +814,22 @@ private fun matchesSessionSearch(
     return thread.preview.lowercase(Locale.ROOT).contains(normalizedQuery) ||
         thread.cwd.lowercase(Locale.ROOT).contains(normalizedQuery) ||
         thread.serverName.lowercase(Locale.ROOT).contains(normalizedQuery)
+}
+
+private data class FolderSessionGroup(
+    val folderPath: String,
+    val threads: List<ThreadState>,
+)
+
+private fun groupSessionsByFolder(threads: List<ThreadState>): List<FolderSessionGroup> {
+    val grouped = LinkedHashMap<String, MutableList<ThreadState>>()
+    threads.forEach { thread ->
+        val folderPath = normalizeFolderPath(thread.cwd)
+        grouped.getOrPut(folderPath) { mutableListOf() }.add(thread)
+    }
+    return grouped.map { (folderPath, groupThreads) ->
+        FolderSessionGroup(folderPath = folderPath, threads = groupThreads)
+    }
 }
 
 @Composable
@@ -867,7 +971,7 @@ private fun ConversationPanel(
     }
 
     Column(
-        modifier = Modifier.fillMaxSize().imePadding(),
+        modifier = Modifier.fillMaxSize(),
     ) {
         LazyColumn(
             state = listState,
@@ -881,6 +985,7 @@ private fun ConversationPanel(
         }
 
         InputBar(
+            modifier = Modifier.imePadding(),
             draft = draft,
             attachedImagePath = attachedImagePath,
             attachmentError = attachmentError,
@@ -1215,6 +1320,7 @@ private fun SystemMessageCard(message: ChatMessage) {
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 private fun InputBar(
+    modifier: Modifier = Modifier,
     draft: String,
     attachedImagePath: String?,
     attachmentError: String?,
@@ -1276,8 +1382,11 @@ private fun InputBar(
     var experimentalFeaturesLoading by remember { mutableStateOf(false) }
     var skills by remember { mutableStateOf<List<SkillMetadata>>(emptyList()) }
     var skillsLoading by remember { mutableStateOf(false) }
+    var showAttachmentMenu by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     fun clearFileSearchState() {
         fileSearchJob?.cancel()
@@ -1823,41 +1932,42 @@ private fun InputBar(
         )
     }
 
-    Surface(
-        modifier = Modifier.fillMaxWidth().navigationBarsPadding(),
-        color = LitterTheme.surface,
+    Column(
+        modifier = modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 16.dp, top = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
             if (attachedImagePath != null) {
                 Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = LitterTheme.surface,
+                    shape = RoundedCornerShape(12.dp),
+                    color = LitterTheme.surfaceLight,
                     border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
+                    modifier = Modifier.padding(bottom = 2.dp)
                 ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 7.dp),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Icon(
                             imageVector = Icons.Default.Image,
                             contentDescription = null,
-                            tint = LitterTheme.textSecondary,
-                            modifier = Modifier.size(14.dp),
+                            tint = LitterTheme.accent,
+                            modifier = Modifier.size(16.dp),
                         )
                         Text(
                             text = attachedImagePath.substringAfterLast('/'),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            color = LitterTheme.textSecondary,
+                            color = LitterTheme.textPrimary,
                             style = MaterialTheme.typography.labelLarge,
                             modifier = Modifier.weight(1f),
                         )
-                        IconButton(onClick = onClearAttachment, enabled = !isSending) {
-                            Icon(Icons.Default.Close, contentDescription = "Remove attachment", modifier = Modifier.size(14.dp))
+                        IconButton(
+                            onClick = onClearAttachment, 
+                            enabled = !isSending,
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "Remove attachment", modifier = Modifier.size(14.dp), tint = LitterTheme.textSecondary)
                         }
                     }
                 }
@@ -1868,14 +1978,15 @@ private fun InputBar(
                     text = attachmentError,
                     color = LitterTheme.danger,
                     style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.padding(horizontal = 4.dp)
                 )
             }
 
             if (showSlashPopup) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    color = LitterTheme.surface.copy(alpha = 0.95f),
+                    shape = RoundedCornerShape(12.dp),
+                    color = LitterTheme.surfaceLight.copy(alpha = 0.98f),
                     border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
                 ) {
                     Column {
@@ -1885,8 +1996,8 @@ private fun InputBar(
                                     Modifier
                                         .fillMaxWidth()
                                         .clickable { applySlashSuggestion(command) }
-                                        .padding(horizontal = 12.dp, vertical = 9.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
@@ -1904,7 +2015,7 @@ private fun InputBar(
                                 )
                             }
                             if (index < slashSuggestions.lastIndex) {
-                                HorizontalDivider(color = LitterTheme.border)
+                                HorizontalDivider(color = LitterTheme.border, thickness = 0.5.dp)
                             }
                         }
                     }
@@ -1914,8 +2025,8 @@ private fun InputBar(
             if (showFilePopup) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    color = LitterTheme.surface.copy(alpha = 0.95f),
+                    shape = RoundedCornerShape(12.dp),
+                    color = LitterTheme.surfaceLight.copy(alpha = 0.98f),
                     border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
                 ) {
                     when {
@@ -1924,7 +2035,7 @@ private fun InputBar(
                                 text = "Searching files...",
                                 color = LitterTheme.textSecondary,
                                 style = MaterialTheme.typography.labelLarge,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
                             )
                         }
 
@@ -1933,7 +2044,7 @@ private fun InputBar(
                                 text = fileSearchError.orEmpty(),
                                 color = LitterTheme.danger,
                                 style = MaterialTheme.typography.labelLarge,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
                             )
                         }
 
@@ -1942,7 +2053,7 @@ private fun InputBar(
                                 text = "No matches",
                                 color = LitterTheme.textSecondary,
                                 style = MaterialTheme.typography.labelLarge,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
                             )
                         }
 
@@ -1955,15 +2066,15 @@ private fun InputBar(
                                             Modifier
                                                 .fillMaxWidth()
                                                 .clickable { applyFileSuggestion(suggestion) }
-                                                .padding(horizontal = 12.dp, vertical = 9.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                     ) {
                                         Icon(
                                             imageVector = Icons.Default.Folder,
                                             contentDescription = null,
                                             tint = LitterTheme.textSecondary,
-                                            modifier = Modifier.size(14.dp),
+                                            modifier = Modifier.size(16.dp),
                                         )
                                         Text(
                                             text = suggestion.path,
@@ -1975,7 +2086,7 @@ private fun InputBar(
                                         )
                                     }
                                     if (index < visibleSuggestions.lastIndex) {
-                                        HorizontalDivider(color = LitterTheme.border)
+                                        HorizontalDivider(color = LitterTheme.border, thickness = 0.5.dp)
                                     }
                                 }
                             }
@@ -1984,56 +2095,143 @@ private fun InputBar(
                 }
             }
 
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(26.dp),
+            color = LitterTheme.surfaceLight,
+            border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
+        ) {
+            val actionButtonSize = 36.dp
+            val actionIconSize = 18.dp
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                OutlinedButton(onClick = onAttachImage, enabled = !isSending) {
-                    Icon(Icons.Default.AttachFile, contentDescription = "Attach image", modifier = Modifier.size(16.dp))
-                }
-                OutlinedButton(onClick = onCaptureImage, enabled = !isSending) {
-                    Icon(Icons.Default.CameraAlt, contentDescription = "Capture image", modifier = Modifier.size(16.dp))
+                Box {
+                    Box(
+                        modifier = Modifier
+                            .size(actionButtonSize)
+                            .clip(CircleShape)
+                            .background(LitterTheme.surface)
+                            .clickable(enabled = !isSending) { showAttachmentMenu = true },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = "Attachments",
+                            modifier = Modifier.size(actionIconSize),
+                            tint = LitterTheme.textPrimary
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = showAttachmentMenu,
+                        onDismissRequest = { showAttachmentMenu = false },
+                        containerColor = LitterTheme.surfaceLight,
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Upload File", color = LitterTheme.textPrimary, style = MaterialTheme.typography.bodyMedium) },
+                            onClick = {
+                                showAttachmentMenu = false
+                                onAttachImage()
+                            },
+                            leadingIcon = { Icon(Icons.Default.AttachFile, contentDescription = null, modifier = Modifier.size(18.dp), tint = LitterTheme.textSecondary) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Camera", color = LitterTheme.textPrimary, style = MaterialTheme.typography.bodyMedium) },
+                            onClick = {
+                                showAttachmentMenu = false
+                                onCaptureImage()
+                            },
+                            leadingIcon = { Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(18.dp), tint = LitterTheme.textSecondary) }
+                        )
+                    }
                 }
 
-                OutlinedTextField(
-                    value = composerValue,
-                    onValueChange = { nextValue ->
-                        composerValue = nextValue
-                        onDraftChange(nextValue.text)
-                        refreshComposerPopups(nextValue)
-                    },
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("Message litter...") },
-                    minLines = 1,
-                    maxLines = 5,
-                )
+                Spacer(modifier = Modifier.width(4.dp))
 
-                Button(
-                    onClick = {
-                        val trimmed = composerValue.text.trim()
-                        if (attachedImagePath == null) {
-                            val invocation = parseSlashCommandInvocation(trimmed)
-                            if (invocation != null) {
-                                composerValue = TextFieldValue(text = "", selection = TextRange(0))
-                                onDraftChange("")
-                                hideComposerPopups()
-                                executeSlashCommand(invocation.command, invocation.args)
-                                return@Button
-                            }
-                        }
-                        onSend(composerValue.text)
-                        hideComposerPopups()
-                    },
-                    enabled = (composerValue.text.isNotBlank() || attachedImagePath != null) && !isSending,
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(vertical = 4.dp, horizontal = 4.dp),
+                    contentAlignment = Alignment.CenterStart
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", modifier = Modifier.size(16.dp))
+                    if (composerValue.text.isEmpty()) {
+                        Text(
+                            text = "Message litter...",
+                            color = LitterTheme.textMuted,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    BasicTextField(
+                        value = composerValue,
+                        onValueChange = { nextValue ->
+                            composerValue = nextValue
+                            onDraftChange(nextValue.text)
+                            refreshComposerPopups(nextValue)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = LitterTheme.textPrimary),
+                        cursorBrush = SolidColor(LitterTheme.accent),
+                        maxLines = 5,
+                    )
                 }
 
-                OutlinedButton(onClick = onInterrupt, enabled = isSending) {
-                    Icon(Icons.Default.Stop, contentDescription = "Interrupt", modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+
+                if (isSending) {
+                    Box(
+                        modifier = Modifier
+                            .size(actionButtonSize)
+                            .clip(CircleShape)
+                            .background(LitterTheme.surface)
+                            .clickable { onInterrupt() },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Default.Stop,
+                            contentDescription = "Interrupt",
+                            modifier = Modifier.size(actionIconSize),
+                            tint = LitterTheme.danger
+                        )
+                    }
+                } else {
+                    val canSend = (composerValue.text.isNotBlank() || attachedImagePath != null)
+                    Box(
+                        modifier = Modifier
+                            .size(actionButtonSize)
+                            .clip(CircleShape)
+                            .background(if (canSend) LitterTheme.accent else Color.Transparent)
+                            .clickable(enabled = canSend) {
+                                val trimmed = composerValue.text.trim()
+                                if (attachedImagePath == null) {
+                                    val invocation = parseSlashCommandInvocation(trimmed)
+                                    if (invocation != null) {
+                                        composerValue = TextFieldValue(text = "", selection = TextRange(0))
+                                        onDraftChange("")
+                                        hideComposerPopups()
+                                        focusManager.clearFocus(force = true)
+                                        keyboardController?.hide()
+                                        executeSlashCommand(invocation.command, invocation.args)
+                                        return@clickable
+                                    }
+                                }
+                                focusManager.clearFocus(force = true)
+                                keyboardController?.hide()
+                                onSend(composerValue.text)
+                                hideComposerPopups()
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "Send",
+                            modifier = Modifier.size(actionIconSize),
+                            tint = if (canSend) LitterTheme.surface else LitterTheme.textMuted
+                        )
+                    }
                 }
-            }
+        }
         }
     }
 }
@@ -2791,6 +2989,11 @@ private fun DirectoryPickerSheet(
     }
 }
 
+private enum class ManualField {
+    HOST,
+    PORT,
+}
+
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 private fun DiscoverySheet(
@@ -2802,10 +3005,422 @@ private fun DiscoverySheet(
     onManualPortChanged: (String) -> Unit,
     onConnectManual: () -> Unit,
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    val configuration = LocalConfiguration.current
+    val useLargeScreenDialog =
+        configuration.screenWidthDp >= 900 || configuration.smallestScreenWidthDp >= 600
+
+    if (useLargeScreenDialog) {
+        val discoveredRowFocusRequester = remember { FocusRequester() }
+        val manualHostFocusRequester = remember { FocusRequester() }
+        val manualPortFocusRequester = remember { FocusRequester() }
+        val manualInlineEditorFocusRequester = remember { FocusRequester() }
+        val manualInlineDoneFocusRequester = remember { FocusRequester() }
+        val manualConnectFocusRequester = remember { FocusRequester() }
+        var editingField by remember { mutableStateOf<ManualField?>(null) }
+        var editingValue by remember { mutableStateOf("") }
+        val canConnect = state.manualHost.isNotBlank() && state.manualPort.isNotBlank()
+        val firstServerId = state.servers.firstOrNull()?.id
+
+        BackHandler(enabled = editingField != null) {
+            editingField = null
+        }
+
+        LaunchedEffect(editingField) {
+            if (editingField != null) {
+                // Avoid auto-opening the on-screen keyboard on TV; users can move up into the field to type.
+                manualInlineDoneFocusRequester.requestFocus()
+            }
+        }
+
+        Dialog(
+            onDismissRequest = onDismiss,
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Box(
+                modifier = Modifier.fillMaxSize().navigationBarsPadding().padding(24.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(0.9f).fillMaxHeight(0.9f),
+                    color = LitterTheme.surface,
+                    shape = RoundedCornerShape(14.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Connect Server", style = MaterialTheme.typography.titleLarge)
+                                Text(
+                                    "Pick a discovered server or enter one manually",
+                                    color = LitterTheme.textSecondary,
+                                    style = MaterialTheme.typography.labelLarge,
+                                )
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(onClick = onRefresh) {
+                                    Text("Refresh")
+                                }
+                                TextButton(onClick = onDismiss) {
+                                    Text("Close", color = LitterTheme.danger)
+                                }
+                            }
+                        }
+
+                        if (state.errorMessage != null) {
+                            Text(state.errorMessage, color = LitterTheme.danger)
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            verticalAlignment = Alignment.Top,
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1.35f).fillMaxHeight(),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text("Discovered", style = MaterialTheme.typography.titleMedium)
+                                if (state.isLoading) {
+                                    Text("Scanning local network and tailscale...", color = LitterTheme.textSecondary)
+                                }
+
+                                Surface(
+                                    modifier = Modifier.fillMaxSize(),
+                                    color = LitterTheme.surface.copy(alpha = 0.6f),
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
+                                ) {
+                                    if (state.servers.isEmpty() && !state.isLoading) {
+                                        Box(
+                                            modifier = Modifier.fillMaxSize().padding(16.dp),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Text("No servers discovered", color = LitterTheme.textMuted)
+                                        }
+                                    } else {
+                                        LazyColumn(
+                                            modifier = Modifier.fillMaxSize().padding(8.dp),
+                                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            items(state.servers, key = { it.id }) { server ->
+                                                Surface(
+                                                    modifier =
+                                                        Modifier
+                                                            .fillMaxWidth()
+                                                            .then(
+                                                                if (server.id == firstServerId) {
+                                                                    Modifier.focusRequester(discoveredRowFocusRequester)
+                                                                } else {
+                                                                    Modifier
+                                                                },
+                                                            )
+                                                            .focusProperties {
+                                                                right = manualHostFocusRequester
+                                                            }.clickable { onConnectDiscovered(server.id) },
+                                                    color = LitterTheme.surfaceLight.copy(alpha = 0.45f),
+                                                    shape = RoundedCornerShape(8.dp),
+                                                    border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
+                                                ) {
+                                                    Column(
+                                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+                                                        verticalArrangement = Arrangement.spacedBy(3.dp),
+                                                    ) {
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                        ) {
+                                                            Text(
+                                                                server.name,
+                                                                color = LitterTheme.textPrimary,
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis,
+                                                            )
+                                                            Text(
+                                                                discoverySourceLabel(server.source),
+                                                                style = MaterialTheme.typography.labelLarge,
+                                                                color = LitterTheme.textSecondary,
+                                                            )
+                                                        }
+                                                        Text(
+                                                            "${server.host}:${server.port}",
+                                                            color = LitterTheme.textSecondary,
+                                                            style = MaterialTheme.typography.labelLarge,
+                                                        )
+                                                        Text(
+                                                            if (server.hasCodexServer) "codex running" else "ssh only",
+                                                            style = MaterialTheme.typography.labelLarge,
+                                                            color = if (server.hasCodexServer) LitterTheme.accent else LitterTheme.textMuted,
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Column(
+                                modifier = Modifier.weight(1f).fillMaxHeight(),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text("Manual", style = MaterialTheme.typography.titleMedium)
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    color = LitterTheme.surface.copy(alpha = 0.6f),
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
+                                ) {
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                                    ) {
+                                        if (editingField == ManualField.HOST) {
+                                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                OutlinedTextField(
+                                                    value = editingValue,
+                                                    onValueChange = {
+                                                        editingValue = it
+                                                        onManualHostChanged(it.trim())
+                                                    },
+                                                    modifier =
+                                                        Modifier
+                                                            .fillMaxWidth()
+                                                            .focusRequester(manualInlineEditorFocusRequester)
+                                                            .focusProperties {
+                                                                down = manualInlineDoneFocusRequester
+                                                                if (state.servers.isNotEmpty()) {
+                                                                    up = discoveredRowFocusRequester
+                                                                }
+                                                            }
+                                                            .onPreviewKeyEvent { event ->
+                                                                if (event.type != KeyEventType.KeyDown) {
+                                                                    return@onPreviewKeyEvent false
+                                                                }
+                                                                when (event.key) {
+                                                                    Key.Back, Key.Escape -> {
+                                                                        editingField = null
+                                                                        true
+                                                                    }
+
+                                                                    Key.DirectionDown -> {
+                                                                        manualInlineDoneFocusRequester.requestFocus()
+                                                                        true
+                                                                    }
+
+                                                                    Key.DirectionUp -> {
+                                                                        if (state.servers.isNotEmpty()) {
+                                                                            discoveredRowFocusRequester.requestFocus()
+                                                                            true
+                                                                        } else {
+                                                                            false
+                                                                        }
+                                                                    }
+
+                                                                    else -> false
+                                                                }
+                                                            },
+                                                    singleLine = true,
+                                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                                                    label = { Text("Host") },
+                                                )
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                ) {
+                                                    Text(
+                                                        "Editing host",
+                                                        color = LitterTheme.textMuted,
+                                                        style = MaterialTheme.typography.labelLarge,
+                                                    )
+                                                    TextButton(
+                                                        onClick = { editingField = null },
+                                                        modifier =
+                                                            Modifier
+                                                                .focusRequester(manualInlineDoneFocusRequester)
+                                                                .focusProperties {
+                                                                    up = manualInlineEditorFocusRequester
+                                                                    down = manualPortFocusRequester
+                                                                },
+                                                    ) {
+                                                        Text("Done")
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            Surface(
+                                                modifier =
+                                                    Modifier
+                                                        .fillMaxWidth()
+                                                        .focusRequester(manualHostFocusRequester)
+                                                        .focusProperties {
+                                                            if (state.servers.isNotEmpty()) {
+                                                                up = discoveredRowFocusRequester
+                                                            }
+                                                            down = manualPortFocusRequester
+                                                        }.clickable {
+                                                            editingField = ManualField.HOST
+                                                            editingValue = state.manualHost
+                                                        },
+                                                color = LitterTheme.surfaceLight.copy(alpha = 0.65f),
+                                                shape = RoundedCornerShape(8.dp),
+                                                border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
+                                            ) {
+                                                Column(
+                                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                                ) {
+                                                    Text("Host", color = LitterTheme.textSecondary, style = MaterialTheme.typography.labelLarge)
+                                                    Text(
+                                                        if (state.manualHost.isBlank()) "Set host" else state.manualHost,
+                                                        color = if (state.manualHost.isBlank()) LitterTheme.textMuted else LitterTheme.textPrimary,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        if (editingField == ManualField.PORT) {
+                                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                OutlinedTextField(
+                                                    value = editingValue,
+                                                    onValueChange = {
+                                                        val digitsOnly = it.filter { ch -> ch.isDigit() }
+                                                        editingValue = digitsOnly
+                                                        onManualPortChanged(digitsOnly)
+                                                    },
+                                                    modifier =
+                                                        Modifier
+                                                            .fillMaxWidth()
+                                                            .focusRequester(manualInlineEditorFocusRequester)
+                                                            .focusProperties {
+                                                                up = manualHostFocusRequester
+                                                                down = manualInlineDoneFocusRequester
+                                                            }
+                                                            .onPreviewKeyEvent { event ->
+                                                                if (event.type != KeyEventType.KeyDown) {
+                                                                    return@onPreviewKeyEvent false
+                                                                }
+                                                                when (event.key) {
+                                                                    Key.Back, Key.Escape -> {
+                                                                        editingField = null
+                                                                        true
+                                                                    }
+
+                                                                    Key.DirectionDown -> {
+                                                                        manualInlineDoneFocusRequester.requestFocus()
+                                                                        true
+                                                                    }
+
+                                                                    Key.DirectionUp -> {
+                                                                        manualHostFocusRequester.requestFocus()
+                                                                        true
+                                                                    }
+
+                                                                    else -> false
+                                                                }
+                                                            },
+                                                    singleLine = true,
+                                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                                    label = { Text("Port") },
+                                                )
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                ) {
+                                                    Text(
+                                                        "Editing port",
+                                                        color = LitterTheme.textMuted,
+                                                        style = MaterialTheme.typography.labelLarge,
+                                                    )
+                                                    TextButton(
+                                                        onClick = { editingField = null },
+                                                        modifier =
+                                                            Modifier
+                                                                .focusRequester(manualInlineDoneFocusRequester)
+                                                                .focusProperties {
+                                                                    up = manualInlineEditorFocusRequester
+                                                                    down = if (canConnect) manualConnectFocusRequester else manualHostFocusRequester
+                                                                },
+                                                    ) {
+                                                        Text("Done")
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            Surface(
+                                                modifier =
+                                                    Modifier
+                                                        .fillMaxWidth()
+                                                        .focusRequester(manualPortFocusRequester)
+                                                        .focusProperties {
+                                                            up = manualHostFocusRequester
+                                                            down = if (canConnect) manualConnectFocusRequester else manualHostFocusRequester
+                                                        }.clickable {
+                                                            editingField = ManualField.PORT
+                                                            editingValue = state.manualPort
+                                                        },
+                                                color = LitterTheme.surfaceLight.copy(alpha = 0.65f),
+                                                shape = RoundedCornerShape(8.dp),
+                                                border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
+                                            ) {
+                                                Column(
+                                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                                ) {
+                                                    Text("Port", color = LitterTheme.textSecondary, style = MaterialTheme.typography.labelLarge)
+                                                    Text(
+                                                        if (state.manualPort.isBlank()) "Set port" else state.manualPort,
+                                                        color = if (state.manualPort.isBlank()) LitterTheme.textMuted else LitterTheme.textPrimary,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Spacer(modifier = Modifier.weight(1f))
+                                Button(
+                                    onClick = onConnectManual,
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .focusRequester(manualConnectFocusRequester)
+                                            .focusProperties {
+                                                up = if (editingField != null) manualInlineEditorFocusRequester else manualPortFocusRequester
+                                            },
+                                    enabled = canConnect,
+                                ) {
+                                    Text("Connect Manual Server")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
+
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+    ) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.9f).padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -2836,7 +3451,11 @@ private fun DiscoverySheet(
                 Text("No servers discovered", color = LitterTheme.textMuted)
             } else {
                 LazyColumn(
-                    modifier = Modifier.fillMaxWidth().fillMaxHeight(0.4f),
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false)
+                            .heightIn(min = 140.dp, max = 320.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     items(state.servers, key = { it.id }) { server ->
@@ -2883,35 +3502,37 @@ private fun DiscoverySheet(
                 }
             }
 
-            Text("Manual", style = MaterialTheme.typography.titleMedium)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                OutlinedTextField(
-                    value = state.manualHost,
-                    onValueChange = onManualHostChanged,
-                    label = { Text("Host") },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
-                )
-                OutlinedTextField(
-                    value = state.manualPort,
-                    onValueChange = onManualPortChanged,
-                    label = { Text("Port") },
-                    modifier = Modifier.width(110.dp),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                )
-            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Manual", style = MaterialTheme.typography.titleMedium)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = state.manualHost,
+                        onValueChange = onManualHostChanged,
+                        label = { Text("Host") },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = state.manualPort,
+                        onValueChange = onManualPortChanged,
+                        label = { Text("Port") },
+                        modifier = Modifier.width(110.dp),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                    )
+                }
 
-            Button(
-                onClick = onConnectManual,
-                modifier = Modifier.fillMaxWidth(),
-                enabled = state.manualHost.isNotBlank() && state.manualPort.isNotBlank(),
-            ) {
-                Text("Connect Manual Server")
+                Button(
+                    onClick = onConnectManual,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = state.manualHost.isNotBlank() && state.manualPort.isNotBlank(),
+                ) {
+                    Text("Connect Manual Server")
+                }
             }
         }
     }
@@ -3046,72 +3667,144 @@ private fun SettingsSheet(
     onOpenDiscovery: () -> Unit,
     onRemoveServer: (String) -> Unit,
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Text("Settings", style = MaterialTheme.typography.titleMedium)
+    val configuration = LocalConfiguration.current
+    val useLargeScreenDialog =
+        configuration.screenWidthDp >= 900 || configuration.smallestScreenWidthDp >= 600
 
-            Text("Authentication", color = LitterTheme.textSecondary, style = MaterialTheme.typography.labelLarge)
-            Surface(
-                modifier = Modifier.fillMaxWidth().clickable { onOpenAccount() },
-                color = LitterTheme.surface.copy(alpha = 0.6f),
-                shape = RoundedCornerShape(8.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
+    if (useLargeScreenDialog) {
+        Dialog(
+            onDismissRequest = onDismiss,
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Box(
+                modifier = Modifier.fillMaxSize().navigationBarsPadding().padding(24.dp),
+                contentAlignment = Alignment.Center,
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                Surface(
+                    modifier = Modifier.fillMaxWidth(0.9f).fillMaxHeight(0.9f),
+                    color = LitterTheme.surface,
+                    shape = RoundedCornerShape(14.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
                 ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text("Account", color = LitterTheme.textPrimary)
-                        Text(accountState.summaryTitle, color = LitterTheme.textSecondary, style = MaterialTheme.typography.labelLarge)
-                    }
-                    Text("Open", color = LitterTheme.accent, style = MaterialTheme.typography.labelLarge)
+                    SettingsSheetContent(
+                        accountState = accountState,
+                        connectedServers = connectedServers,
+                        onDismiss = onDismiss,
+                        onOpenAccount = onOpenAccount,
+                        onOpenDiscovery = onOpenDiscovery,
+                        onRemoveServer = onRemoveServer,
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 14.dp),
+                    )
                 }
             }
+        }
+        return
+    }
 
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+    ) {
+        SettingsSheetContent(
+            accountState = accountState,
+            connectedServers = connectedServers,
+            onDismiss = null,
+            onOpenAccount = onOpenAccount,
+            onOpenDiscovery = onOpenDiscovery,
+            onRemoveServer = onRemoveServer,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        )
+    }
+}
+
+@Composable
+private fun SettingsSheetContent(
+    accountState: AccountState,
+    connectedServers: List<ServerConfig>,
+    onDismiss: (() -> Unit)?,
+    onOpenAccount: () -> Unit,
+    onOpenDiscovery: () -> Unit,
+    onRemoveServer: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (onDismiss == null) {
+            Text("Settings", style = MaterialTheme.typography.titleMedium)
+        } else {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text("Servers", color = LitterTheme.textSecondary, style = MaterialTheme.typography.labelLarge)
-                TextButton(onClick = onOpenDiscovery) {
-                    Text("Add Server")
+                Text("Settings", style = MaterialTheme.typography.titleMedium)
+                TextButton(onClick = onDismiss) {
+                    Text("Close", color = LitterTheme.danger)
                 }
             }
+        }
 
-            if (connectedServers.isEmpty()) {
-                Text("No servers connected", color = LitterTheme.textMuted)
-            } else {
-                connectedServers.forEach { server ->
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        color = LitterTheme.surface.copy(alpha = 0.6f),
-                        shape = RoundedCornerShape(8.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
+        Text("Authentication", color = LitterTheme.textSecondary, style = MaterialTheme.typography.labelLarge)
+        Surface(
+            modifier = Modifier.fillMaxWidth().clickable { onOpenAccount() },
+            color = LitterTheme.surface.copy(alpha = 0.6f),
+            shape = RoundedCornerShape(8.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Account", color = LitterTheme.textPrimary)
+                    Text(accountState.summaryTitle, color = LitterTheme.textSecondary, style = MaterialTheme.typography.labelLarge)
+                }
+                Text("Open", color = LitterTheme.accent, style = MaterialTheme.typography.labelLarge)
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text("Servers", color = LitterTheme.textSecondary, style = MaterialTheme.typography.labelLarge)
+            TextButton(onClick = onOpenDiscovery) {
+                Text("Add Server")
+            }
+        }
+
+        if (connectedServers.isEmpty()) {
+            Text("No servers connected", color = LitterTheme.textMuted)
+        } else {
+            connectedServers.forEach { server ->
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = LitterTheme.surface.copy(alpha = 0.6f),
+                    shape = RoundedCornerShape(8.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, LitterTheme.border),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
-                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text(server.name, color = LitterTheme.textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(
-                                    "${server.host}:${server.port} * ${serverSourceLabel(server.source)}",
-                                    color = LitterTheme.textSecondary,
-                                    style = MaterialTheme.typography.labelLarge,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            TextButton(onClick = { onRemoveServer(server.id) }) {
-                                Text("Remove", color = LitterTheme.danger)
-                            }
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(server.name, color = LitterTheme.textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                "${server.host}:${server.port} * ${serverSourceLabel(server.source)}",
+                                color = LitterTheme.textSecondary,
+                                style = MaterialTheme.typography.labelLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        TextButton(onClick = { onRemoveServer(server.id) }) {
+                            Text("Remove", color = LitterTheme.danger)
                         }
                     }
                 }
@@ -3270,11 +3963,24 @@ private fun serverSourceAccentColor(source: ServerSource): Color =
     }
 
 private fun cwdLeaf(path: String): String {
-    val trimmed = path.trim().trimEnd('/')
-    if (trimmed.isEmpty() || trimmed == "/") {
+    val trimmed = normalizeFolderPath(path)
+    if (trimmed == "/") {
         return "/"
     }
     return trimmed.substringAfterLast('/')
+}
+
+private fun normalizeFolderPath(path: String): String {
+    val trimmed = path.trim()
+    if (trimmed.isEmpty()) {
+        return "/"
+    }
+
+    var normalized = trimmed.replace(Regex("/+"), "/")
+    while (normalized.length > 1 && normalized.endsWith("/")) {
+        normalized = normalized.dropLast(1)
+    }
+    return if (normalized.isEmpty()) "/" else normalized
 }
 
 private fun discoverySourceLabel(source: DiscoverySource): String =
